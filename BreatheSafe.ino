@@ -24,14 +24,17 @@ DHT dht(DHTPIN, DHTTYPE);
 
 // **Gas Sensor Setup**
 #define GAS_SENSOR_PIN 34
+#define BAD_AIR_THRESHOLD 200  
+int sensorThreshold = 100;
 
 // **Relay & Buzzer Setup**
 #define RELAY_PIN 26
 #define BUZZER_PIN 27
 
 // **Control Variables**
-bool mistManual = false;  // MistSwitch Mode (ON = Manual, OFF = Auto)
-bool systemOn = false;
+bool mistManual = false;  
+bool systemOn = true;  
+bool alarmTriggered = false;
 
 // **Function to Connect to Blynk**
 void connectBlynk() {
@@ -39,7 +42,80 @@ void connectBlynk() {
     Blynk.connect();
 }
 
-// **Setup Function**
+// **Function to Read Gas Sensor**
+int readGasSensor() {
+    if (!systemOn) return 0;
+    int gasValue = analogRead(GAS_SENSOR_PIN);
+    Serial.print("Gas Value: ");
+    Serial.println(gasValue);
+    return gasValue;
+}
+
+// **Function to Determine Air Quality**
+String getAirQuality(int gasValue) {
+    return (gasValue < BAD_AIR_THRESHOLD) ? "Fresh Air" : "Bad Air";
+}
+
+// **Function to Power ON the System**
+void powerOnSystem() {
+    systemOn = true;
+    
+    // **Reinitialize LCD**
+    lcd.begin(16, 2);
+    lcd.setBacklight(255);
+    lcd.clear();
+    
+    lcd.setCursor(2, 0);
+    lcd.print("BreatheSafe");
+    lcd.setCursor(5, 1);
+    lcd.print("by Coy");
+
+    tone(BUZZER_PIN, 1200, 100);
+    delay(150);
+    tone(BUZZER_PIN, 1500, 100);
+    delay(150);
+    tone(BUZZER_PIN, 1800, 150);
+    delay(200);
+    noTone(BUZZER_PIN);
+
+    delay(2000);
+    Serial.println("System Powered ON.");
+}
+
+// **Function to Power OFF the System**
+void shutdownSystem() {
+    systemOn = false;
+    
+    // **Display Shutdown Message on LCD**
+    lcd.clear();
+    lcd.setBacklight(255);
+    lcd.setCursor(1, 0);
+    lcd.print("System Shutting");
+    lcd.setCursor(5, 1);
+    lcd.print("Down...");
+
+    tone(BUZZER_PIN, 1800, 100);
+    delay(150);
+    tone(BUZZER_PIN, 1500, 100);
+    delay(150);
+    tone(BUZZER_PIN, 1200, 150);
+    delay(200);
+    noTone(BUZZER_PIN);
+
+    delay(3000);
+
+    // **LCD remains powered but blank**
+    lcd.clear();
+    lcd.setBacklight(0);  
+
+    // **Turn OFF Relay & Reset Mist Control**
+    digitalWrite(RELAY_PIN, LOW);
+    mistManual = false; // Reset to Auto Mode
+    
+    Serial.println("System Powered OFF.");
+}
+
+// **Setup Function (Device Boots Up Automatically)**
 void setup() {
     Serial.begin(115200);
     Serial.println("Starting...");
@@ -70,153 +146,108 @@ void setup() {
     noTone(BUZZER_PIN);
 
     Serial.println("System Ready!");
+
+    // ✅ **Automatically Turn On System at Startup**
+    powerOnSystem();
 }
 
 // **Function to Read Sensors & Update Blynk**
 void sendSensorData() {
-    if (!systemOn) return;  // Skip if system is off
+    if (!systemOn) return;
 
     float temperature = dht.readTemperature();
     float humidity = dht.readHumidity();
-    
-    // **Convert Gas Sensor Value to Percentage**
-    int rawGasValue = analogRead(GAS_SENSOR_PIN);
-    int gasPercentage = map(rawGasValue, 0, 4095, 0, 100); // Mapping 0-4095 ADC to 0-100%
-
-    // **Determine Gas Level Quality**
-    String gasQuality = (gasPercentage <= 70) ? "Good Air" : "Bad Air";
+    int gasValue = readGasSensor();
+    String gasQuality = getAirQuality(gasValue);
 
     // **Send Data to Blynk**
     Blynk.virtualWrite(V0, temperature);
     Blynk.virtualWrite(V1, humidity);
-    Blynk.virtualWrite(V2, gasPercentage);
-    Blynk.virtualWrite(V6, gasQuality); // Sending Gas Quality Status
+    Blynk.virtualWrite(V2, gasValue);
+    Blynk.virtualWrite(V6, gasQuality);
 
     // **Display Temperature & Humidity on LCD**
     lcd.clear();
     lcd.setCursor(0, 0);
-    lcd.print("Temp: "); 
+    lcd.print("Temp: ");
     lcd.print(temperature);
-    lcd.print((char)223); // **Degree Symbol (°)**
+    lcd.print((char)223); // Degree Symbol (°)
     lcd.print("C");
-    lcd.setCursor(15, 0);  // Move to the right edge
-    lcd.print(mistManual ? "M" : "A");
+    lcd.setCursor(15, 0);  
+    lcd.print(mistManual ? "M" : "A");  
 
     lcd.setCursor(0, 1);
-    lcd.print("Humid: "); lcd.print(humidity); lcd.print("%");
+    lcd.print("Humid: ");
+    lcd.print(humidity);
+    lcd.print("%");
 
     delay(3000);
-    
+
     // **Display Gas Value & Air Quality on LCD**
     lcd.clear();
     lcd.setCursor(0, 0);
     lcd.print("Gas Value: ");
-    lcd.print(gasPercentage);
-    lcd.print("%");
-    lcd.setCursor(15, 0);  // Move to the right edge
+    lcd.print(gasValue);
+    lcd.setCursor(15, 0);
     lcd.print(mistManual ? "M" : "A");
 
-    lcd.setCursor(4, 1);  // **Centered Air Quality Message**
+    lcd.setCursor(0, 1);
     lcd.print(gasQuality);
 
     delay(3000);
 
-    // **Auto Mist Control (Only in Auto Mode)**
+    // **Trigger Alarm if Gas is Bad (≥200)**
+    if (gasValue >= BAD_AIR_THRESHOLD && !alarmTriggered) {
+        Serial.println("ALERT: Bad Air Detected! Activating Buzzer.");
+        tone(BUZZER_PIN, 1000);  
+        delay(2000);  
+        noTone(BUZZER_PIN);
+        alarmTriggered = true;  
+        Blynk.logEvent("pollution_alert", "Bad Air Detected!");
+    } else if (gasValue < BAD_AIR_THRESHOLD) {
+        alarmTriggered = false;  
+    }
+
+    // **Relay Control Logic (Auto Mode)**
     if (!mistManual) {  
-        bool relayState = (temperature >= 27);  // Auto Mode: Turn on mist at ≥27°C
-        digitalWrite(RELAY_PIN, relayState);
+        if (temperature >= 30) {
+            digitalWrite(RELAY_PIN, HIGH);
+        } else {
+            digitalWrite(RELAY_PIN, LOW);
+        }
     }
 
     // **Send Relay State to Blynk**
     Blynk.virtualWrite(V3, digitalRead(RELAY_PIN));
 }
 
-// **Function to Power ON the System**
-void powerOnSystem() {
-    systemOn = true;
-    lcd.setBacklight(255);
-    lcd.clear();
-    
-    // **Centered "BreatheSafe" Text**
-    lcd.setCursor(2, 0);
-    lcd.print("BreatheSafe");
-    lcd.setCursor(5, 1);  // Centered "by Coy"
-    lcd.print("by Coy");
-
-    // **Play Power On Sound**
-    tone(BUZZER_PIN, 1200, 100);
-    delay(150);
-    tone(BUZZER_PIN, 1500, 100);
-    delay(150);
-    tone(BUZZER_PIN, 1800, 150);
-    delay(200);
-    noTone(BUZZER_PIN);
-
-    delay(2000);
-    Serial.println("System Powered ON.");
-}
-
-// **Function to Power OFF the System**
-void shutdownSystem() {
-    systemOn = false;
-    lcd.clear();
-    lcd.setBacklight(255);
-
-    // **Centered "BreatheSafe" Text**
-    lcd.setCursor(2, 0);
-    lcd.print("BreatheSafe");
-    lcd.setCursor(5, 1);  // Centered "by Coy"
-    lcd.print("by Coy");
-
-    // **Play Power Off Sound**
-    tone(BUZZER_PIN, 1800, 100);
-    delay(150);
-    tone(BUZZER_PIN, 1500, 100);
-    delay(150);
-    tone(BUZZER_PIN, 1200, 150);
-    delay(200);
-    noTone(BUZZER_PIN);
-
-    delay(3000);
-    lcd.clear();
-    lcd.setBacklight(0);
-    lcd.noDisplay();
-    digitalWrite(RELAY_PIN, LOW);
-
-    Serial.println("System Powered OFF.");
-}
-
-// **BLYNK: MistSwitch Control (V3)**
+// **BLYNK: Mist Mode Control (V3)**
 BLYNK_WRITE(V3) {
     int state = param.asInt();
     
-    if (state == 1) {  // **Manual Mode: Turn Mist ON**
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    
+    if (state == 1) {  
         mistManual = true;
         digitalWrite(RELAY_PIN, HIGH);
-        lcd.clear();
-        lcd.setCursor(2, 0);
-        lcd.print("Mist Turn ON");
-        Serial.println("Mist Manually Turned ON");
-    } else {  // **Auto Mode: Enable Temperature Control**
+        lcd.print("Mist Turned ON");
+    } else {  
         mistManual = false;
         digitalWrite(RELAY_PIN, LOW);
-        lcd.clear();
-        lcd.setCursor(2, 0);
-        lcd.print("Mist Turn OFF");
-        Serial.println("Mist Switched to Auto Mode");
+        lcd.print("Mist Turned OFF");
     }
 
+    lcd.setCursor(15, 0);
+    lcd.print(mistManual ? "M" : "A");  
     delay(2000);
-    sendSensorData(); // Ensure sensor values update immediately
-
-    // **Send Updated Status to Blynk**
-    Blynk.virtualWrite(V3, digitalRead(RELAY_PIN));
+    sendSensorData();
 }
 
-// **BLYNK: System Power Control (V4)**
+// **BLYNK: Power ON/OFF Control (V4)**
 BLYNK_WRITE(V4) {
-    int powerState = param.asInt();
-    if (powerState == 1) {
+    int state = param.asInt();
+    if (state == 1) {
         powerOnSystem();
     } else {
         shutdownSystem();
@@ -231,6 +262,8 @@ void loop() {
         Serial.println("Blynk Connection Failed... Retrying");
         connectBlynk();
     }
-    sendSensorData();
+    if (systemOn) {
+        sendSensorData();
+    }
     delay(5000);
 }
